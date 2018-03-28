@@ -3,3 +3,4 @@
   <ul>Average_Channel_Range_Leader </ul>
   <ul>pairs trading with mean reversion</ul>
   <ul>turtle system</ul>
+  <ul>Dual Thrust parameters optimizations</ul>
