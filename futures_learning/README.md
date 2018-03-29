@@ -10,3 +10,5 @@
 <ul>Backtesting with AU and AG dominant futures </ul>
 <ul>Without stoploss logic</ul>
 
+<h3>Dual Thrust parameters optimization</h3>
+<li>2018-03-27</li>
