@@ -1,0 +1,484 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "import pandas as pd\n",
+    "import numpy as np\n",
+    "import statsmodels.api as sm"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "collapsed": false,
+    "scrolled": false
+   },
+   "outputs": [],
+   "source": [
+    "all_contracts = all_instruments(\"Future\")\n",
+    "match = r'\\w{1,2}88'\n",
+    "continious_contracts = all_contracts[all_contracts.order_book_id.str.contains(match)]\n",
+    "continious_contracts = continious_contracts.where(continious_contracts[\"product\"] == \"Commodity\").dropna(how=\"all\")\n",
+    "all_commodity = sorted(set(continious_contracts.underlying_symbol))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "continious_contracts.set_index(\"order_book_id\",inplace = True)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "continious_contracts.symbol.apply(lambda x : x if \"麦\" in x else np.nan).dropna()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "# 螺纹钢，铁矿石\n",
+    "pairs1 = [\"RB\",\"I\"]\n",
+    "# 焦煤，焦炭\n",
+    "pairs2 = [\"JM\",\"J\"]\n",
+    "# 鸡蛋，玉米，豆粕\n",
+    "pairs3 = [\"JD\",\"M\"]\n",
+    "# ,\"C\"\n",
+    "# 强麦，硬麦\n",
+    "# pairs4 = [\"WH\",\"WT\"]\n",
+    "# 银，金\n",
+    "pairs5 = [\"AG\",\"AU\"]\n",
+    "# 铜，锌\n",
+    "pairs6 = [\"CU\",\"ZN\"]"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "def winsorized(series,n = 3):\n",
+    "  median = series.median()\n",
+    "  median_distance = abs(series - median).median()\n",
+    "  return series.clip(median-n*median_distance,median+n*median_distance)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def get_efficient(pairs,start_date,end_date):\n",
+    "  close_price = list(map(lambda x: get_price(x+\"88\",start_date,end_date,fields=\"close\"),pairs))\n",
+    "#   print(close_price)\n",
+    "  pairs_data = pd.concat([close_price[0],close_price[1]],axis=1).dropna().apply(lambda x:winsorized(x))\n",
+    "  pairs_data.columns = [pairs[0],pairs[1]]\n",
+    "#   print(pairs_data)\n",
+    "  params_coef = sm.OLS(pairs_data.iloc[:,1].values,sm.add_constant(pairs_data.iloc[:,0].values),missing=\"drop\").fit().params\n",
+    "  \n",
+    "  if params_coef[1]>1:\n",
+    "    return {\"x\": pairs[0],\"y\":pairs[1],\"efficient\":int(params_coef[1])}\n",
+    "  params_coef = sm.OLS(pairs_data.iloc[:,0].values,sm.add_constant(pairs_data.iloc[:,1].values),missing=\"drop\").fit().params\n",
+    "  if params_coef[1]>1:\n",
+    "    return {\"x\": pairs[1],\"y\":pairs[0],\"efficient\":int(params_coef[1])}\n",
+    "  \n",
+    "  return {\"x\": pairs[0],\"y\":pairs[1],\"efficient\":1}"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def get_backTest_sharpe(pairs,k1,k2,windows):\n",
+    "  pairs_results = get_efficient(pairs,\"2013-01-01\",\"2018-01-01\")\n",
+    "  y = get_price(pairs_results.get(\"y\")+\"88\",\"2013-01-01\",\"2018-01-01\",fields=\"close\",frequency='1m')\n",
+    "  x = get_price(pairs_results.get(\"x\")+\"88\",\"2013-01-01\",\"2018-01-01\",fields=\"close\",frequency='1m')\n",
+    "  spread = y - x*pairs_results.get(\"efficient\")\n",
+    "\n",
+    "  spread_avg = spread.rolling(center=False,window=windows).mean()\n",
+    "  spread_std = spread.rolling(center=False,window=windows).std()\n",
+    "  # 上下届\n",
+    "  up_point = spread_avg+k1*spread_std\n",
+    "  down_point = spread_avg-k2*spread_std\n",
+    "\n",
+    "  # 卖出价差：1：y 价格 处于高位 ；x价格 处于低位, 买x，卖y\n",
+    "  # 买入价差：-1：x 价格处于高位 ；y价格 处于低位，买y，卖x\n",
+    "  signal_S = (spread > up_point).astype(int)\n",
+    "  signal = (spread < down_point).astype(int).replace([0,1],[np.nan,-1]).fillna(signal_S)\n",
+    "\n",
+    "  y_chg = y.pct_change().shift(-1)\n",
+    "  x_chg = x.pct_change().shift(-1)\n",
+    "\n",
+    "  combined_data = pd.concat([signal,x_chg,y_chg],axis=1)\n",
+    "  combined_data.columns = [\"signal\",\"x_chg\",\"y_chg\"]\n",
+    "\n",
+    "  # x与y的收益率差， 当期至下一时期的收益率\n",
+    "  combined_data[\"DIFF\"] = (combined_data[\"x_chg\"] - combined_data[\"y_chg\"])\n",
+    "  rets = (combined_data[\"signal\"]*combined_data[\"DIFF\"])\n",
+    "  sharpe = rets.mean()/rets.std()\n",
+    "  return sharpe\n",
+    "  "
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "results = {}\n",
+    "i = 0\n",
+    "\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [],
+   "source": [
+    "\n",
+    "k1_list = [2,3]\n",
+    "k2_list = [2,3]\n",
+    "windows_list = np.arange(20,90,10)\n",
+    "pairs_list = {\"pairs1\":pairs1,\"pairs2\":pairs2,\"pairs3\":pairs3,\"pairs5\":pairs5,\"pairs6\":pairs6}\n",
+    "# pairs_list = {\"pairs6\":pairs6}\n",
+    "\n",
+    "\n",
+    "\n",
+    "for k1 in k1_list:\n",
+    "  for k2 in k2_list:\n",
+    "    for pairs in pairs_list.keys():\n",
+    "      for windows in windows_list:\n",
+    "        print(i,k1,k2,pairs,windows)\n",
+    "        sharpe = get_backTest_sharpe(pairs_list.get(pairs),k1,k2,windows)\n",
+    "        res = pd.Series([sharpe,k1,k2,pairs,windows],index = [\"sharpe\",\"k1\",\"k2\",\"pairs\",\"windows\"])\n",
+    "        results[i] = res\n",
+    "        i+=1\n",
+    "\n",
+    "\n",
+    "      \n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 41,
+   "metadata": {
+    "collapsed": false,
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "pairs_results = pd.DataFrame(results).T.set_index([\"pairs\",\"windows\"]).sort_index()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 42,
+   "metadata": {
+    "collapsed": false,
+    "scrolled": true
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>sharpe</th>\n",
+       "      <th>k1</th>\n",
+       "      <th>k2</th>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>windows</th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "      <th></th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>20</th>\n",
+       "      <td>0.0578389</td>\n",
+       "      <td>2</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>30</th>\n",
+       "      <td>0.0565234</td>\n",
+       "      <td>2</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>40</th>\n",
+       "      <td>0.0542765</td>\n",
+       "      <td>2</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>50</th>\n",
+       "      <td>0.0509585</td>\n",
+       "      <td>2</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>60</th>\n",
+       "      <td>0.0479434</td>\n",
+       "      <td>2</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>70</th>\n",
+       "      <td>0.0465964</td>\n",
+       "      <td>2</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>20</th>\n",
+       "      <td>0.045608</td>\n",
+       "      <td>3</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>30</th>\n",
+       "      <td>0.0442899</td>\n",
+       "      <td>3</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>40</th>\n",
+       "      <td>0.0441258</td>\n",
+       "      <td>3</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>80</th>\n",
+       "      <td>0.0439753</td>\n",
+       "      <td>2</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>50</th>\n",
+       "      <td>0.0406672</td>\n",
+       "      <td>3</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>60</th>\n",
+       "      <td>0.0386041</td>\n",
+       "      <td>3</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>30</th>\n",
+       "      <td>0.0383945</td>\n",
+       "      <td>2</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>40</th>\n",
+       "      <td>0.0380464</td>\n",
+       "      <td>2</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>20</th>\n",
+       "      <td>0.0373428</td>\n",
+       "      <td>2</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>50</th>\n",
+       "      <td>0.0361762</td>\n",
+       "      <td>2</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>70</th>\n",
+       "      <td>0.0354922</td>\n",
+       "      <td>3</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>70</th>\n",
+       "      <td>0.0351937</td>\n",
+       "      <td>2</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>60</th>\n",
+       "      <td>0.0349316</td>\n",
+       "      <td>2</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>80</th>\n",
+       "      <td>0.0349226</td>\n",
+       "      <td>3</td>\n",
+       "      <td>2</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>80</th>\n",
+       "      <td>0.0329886</td>\n",
+       "      <td>2</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>40</th>\n",
+       "      <td>0.0215686</td>\n",
+       "      <td>3</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>60</th>\n",
+       "      <td>0.0210783</td>\n",
+       "      <td>3</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>50</th>\n",
+       "      <td>0.0204534</td>\n",
+       "      <td>3</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>80</th>\n",
+       "      <td>0.0199589</td>\n",
+       "      <td>3</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>70</th>\n",
+       "      <td>0.0196</td>\n",
+       "      <td>3</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>30</th>\n",
+       "      <td>0.0180236</td>\n",
+       "      <td>3</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>20</th>\n",
+       "      <td>0.0140252</td>\n",
+       "      <td>3</td>\n",
+       "      <td>3</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "            sharpe k1 k2\n",
+       "windows                 \n",
+       "20       0.0578389  2  2\n",
+       "30       0.0565234  2  2\n",
+       "40       0.0542765  2  2\n",
+       "50       0.0509585  2  2\n",
+       "60       0.0479434  2  2\n",
+       "70       0.0465964  2  2\n",
+       "20        0.045608  3  2\n",
+       "30       0.0442899  3  2\n",
+       "40       0.0441258  3  2\n",
+       "80       0.0439753  2  2\n",
+       "50       0.0406672  3  2\n",
+       "60       0.0386041  3  2\n",
+       "30       0.0383945  2  3\n",
+       "40       0.0380464  2  3\n",
+       "20       0.0373428  2  3\n",
+       "50       0.0361762  2  3\n",
+       "70       0.0354922  3  2\n",
+       "70       0.0351937  2  3\n",
+       "60       0.0349316  2  3\n",
+       "80       0.0349226  3  2\n",
+       "80       0.0329886  2  3\n",
+       "40       0.0215686  3  3\n",
+       "60       0.0210783  3  3\n",
+       "50       0.0204534  3  3\n",
+       "80       0.0199589  3  3\n",
+       "70          0.0196  3  3\n",
+       "30       0.0180236  3  3\n",
+       "20       0.0140252  3  3"
+      ]
+     },
+     "execution_count": 42,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "pairs_results.sort_values(by=\"sharpe\",ascending=False).xs(\"pairs5\",level=0)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.5.4"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
